@@ -347,3 +347,30 @@ def gaussian(image: Tensor, D0: float) -> Tensor:
     image_fft = image_fft * weights
     image = _to_space(image_fft)
     return image
+
+def ifft2_np(x: np.ndarray) -> np.ndarray:
+    """Numpy version of 2D inverse FFT centered, used for k-space to image.
+    """
+    return np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(x, axes=(-2, -1)), norm="ortho"), axes=(-2, -1))
+
+def fft2_np(x: np.ndarray) -> np.ndarray:
+    """Numpy version of 2D FFT centered, used for image to k-space.
+    """
+    return np.fft.ifftshift(np.fft.fft2(np.fft.fftshift(x, axes=(-2, -1)), norm="ortho"), axes=(-2, -1))
+
+def kspace_to_target(x: np.ndarray) -> np.ndarray:
+    """Generate RSS reconstruction target from k-space data.
+
+    Args:
+        x: K-space data
+
+    Returns:
+        RSS reconstruction target
+    """
+    return np.sqrt(np.sum(np.square(np.abs(ifft2_np(x))), axis=-3)).astype(np.float32)
+
+def normalize_np(img):
+  """ Normalize img in arbitrary range to [0, 1] """
+  #img -= np.min(img)
+  img /= np.max(img)
+  return img

@@ -1,0 +1,12 @@
+outputs
+__pycache__
+*.pyc
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.pkl
+*.log
+*.csv
+.idea

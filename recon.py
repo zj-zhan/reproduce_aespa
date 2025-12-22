@@ -14,10 +14,11 @@ import random
 import hydra
 from hydra.core.config_store import ConfigStore
 from config import MRINeRF_Config
+from skimage.metrics import peak_signal_noise_ratio
 import logging
 from torch.utils.tensorboard import SummaryWriter
 from mr_utils import kspace_to_img_shifted_mc, img_to_kspace_shifted_mc, coil_combine, coil_unfold,k_loss_l1, process_and_undersample_k_space,get_mask,train
-from utils import train_timing
+from utils import train_timing, kspace_to_target,normalize_np
 
 from model import CCM,CSM, mambalayer
 from utils import set_seed, crop_center, random_2d_indices, plot_metrics, dss, total_variation_loss_cc_jh, total_variation_loss_cmap_jh, cc_loss
@@ -63,7 +64,15 @@ def main(cfg: MRINeRF_Config):
     print('k_space directory',k_space)
     print('coil_map directory',coil_map)
     k = np.squeeze(np.load(k_space))
-    print('k.shape[0]',k.shape[0])
+    print('k.shape',k.shape)
+
+    target_width = 320
+    if k.shape[-1] > target_width:
+        start = (k.shape[-1] - target_width) // 2
+        k = k[..., start : start + target_width]
+        print(f"after crop: {k.shape}")
+    target = kspace_to_target(k)
+    maxval = float(np.max(target))
 
     kwargs = {
         'log': log,
@@ -192,7 +201,7 @@ def main(cfg: MRINeRF_Config):
             att_score = torch.sigmoid(att_score)
 
             try:
-                att_score = torch.complex(att_score[0,:16], att_score[0,16:])
+                att_score = torch.complex(att_score[0,:15], att_score[0,15:])
             except:
                 att_score = torch.complex(att_score[0,:20], att_score[0,20:])
             
@@ -233,7 +242,7 @@ def main(cfg: MRINeRF_Config):
                 predicted_c_c_c_c = coil_combine(predicted_c_c_c, predicted_cmap)
                 predicted_c_c_c_c = predicted_c_c_c_c/torch.max(torch.abs(predicted_c_c_c_c))
 
-            if epoch !=0 and (epoch+1) % 1 == 0: #
+            if epoch !=0 and (epoch+1) % 1 == 0: 
 
                 forward_kwargs={
                     'net': net,
@@ -244,6 +253,53 @@ def main(cfg: MRINeRF_Config):
                     'height': height,
                     'step': epoch,
                     }
+                predicted_c_c_final, _ = train(**forward_kwargs)
+            else:
+                predicted_c_c_final = predicted_c_c_c_c
+
+            if epoch % 10 == 0:
+                writer.add_scalar('Loss/Net1', net1_loss.item(), epoch)
+                writer.add_scalar('Loss/Net2', net2_loss.item(), epoch)
+                writer.add_scalar('Loss/AKSM', aksm_loss.item(), epoch)
+                
+                if epoch % 100 == 0:
+                    vis_img = torch.abs(predicted_c_c_final).detach().cpu().unsqueeze(0)
+                    vis_img = vis_img / torch.max(vis_img)
+                    writer.add_image('Reconstruction/Magnitude', vis_img, epoch)
+
+            if epoch == epochs - 1:
+                print(f"\n[Info] Training finished at epoch {epoch}. Saving results...")
+                
+                final_img_np = predicted_c_c_final.detach().cpu().numpy()
+                np.save(os.path.join(save_folder, 'final_recon.npy'), final_img_np)
+                
+                c_est_np = predicted_cmap.detach().cpu().numpy()
+                np.save(os.path.join(save_folder, 'c_est', 'sensitivity_map.npy'), c_est_np)
+                
+                try:
+                    os.makedirs(os.path.join(save_folder, 'images'), exist_ok=True)
+                    plt.imsave(os.path.join(save_folder, 'images', 'final_recon.png'), 
+                               np.abs(final_img_np), cmap='gray')
+                    print("[Info] Image saved to images/final_recon.png")
+                except Exception as e:
+                    print(f"[Error] Failed to save PNG: {e}")
+
+                #recon = np.sqrt(np.sum(np.abs(final_img_np)**2))
+                recon = normalize_np(np.abs(final_img_np))
+                target = normalize_np(target)
+                #print("target type:",target.dtype)
+                #print("target shape:",target.shape)
+                #print("recon type:",recon.dtype)
+                #print("recon shape:",recon.shape)
+                psnr = peak_signal_noise_ratio(target, recon)
+                print("psnr:", psnr)
+                os.makedirs(os.path.join(save_folder, 'weights'), exist_ok=True)
+                torch.save(net.state_dict(), os.path.join(save_folder, 'weights', 'ccm_model.pth'))
+                torch.save(net2.state_dict(), os.path.join(save_folder, 'weights', 'csm_model.pth'))
+                torch.save(mambamodule.state_dict(), os.path.join(save_folder, 'weights', 'aksm_model.pth'))
+                print("[Info] All results saved successfully!")
+
+    writer.close()
 
 
 

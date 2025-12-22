@@ -1,20 +1,20 @@
 defaults:
-  - override hydra/job_logging: custom
+  - override hydra/job_logging: default
 
 files:
-  k_space: /path/to/k_space
+  k_space: /data0/zijian/data/Aespa_data/fmknee_pd_npy
   coil_map: /path/to/coil_map
   mask: /path/to/mask
-  subject: subject_name
-  slice: slice_number
+  subject: file1000528
+  slice: 017_0002242886.npy
 paths:
-  save_folder: /path/to/save_folder
+  save_folder: ./result_exp
 
 models:
   model: joint_training 
         
 hyper_params: 
-  gpu: '1'
+  gpu: '0'
   epochs: 2000
   lr: 5e-4
   aksmlr: 5e-5
@@ -24,7 +24,7 @@ params:
   reduction_factor: 4 # accel
   acs: 28
   center_fraction: 0.09 # (rf4, 0.09) (rf8, 0.05) in brain, image shape (640, 320)
-  mask: 'gaussian1d'
+  mask: 'uniform1d'
   crop_img_size: 320
   cutoff_low_freq: 0.8
   cutoff_high_freq: 200

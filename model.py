@@ -278,7 +278,7 @@ class mambalayer(nn.Module):
             self.mamba = Mamba(
                         d_model=640,
                         d_state=64,  
-                        d_conv=640,    
+                        d_conv=4,    
                         expand=1,   
                     )
             self.ln = torch.nn.LayerNorm(640)
@@ -287,7 +287,7 @@ class mambalayer(nn.Module):
         def forward(self, coords):
             for i in range(1):
                 try:
-                    middle_feature = coords.view(1,32,640,320).permute(0,2,3,1)
+                    middle_feature = coords.view(1,30,640,320).permute(0,2,3,1)
                 except:
                     middle_feature = coords.view(1,40,640,320).permute(0,2,3,1)
                 B, C= middle_feature.shape[:2]
@@ -303,8 +303,12 @@ class mambalayer(nn.Module):
                 coords  = out
                 
             coords = coords.permute(0,3,1,2)
-            try:
-                output = coords[0][:16]+coords[0][16:]
-            except:
-                output = coords[0][:20]+coords[0][20:]
+
+            current_channels = coords.shape[1]
+            half_ch = current_channels // 2
+            output = coords[0][:half_ch] + coords[0][half_ch:]
+            #try:
+            #    output = coords[0][:16]+coords[0][16:]
+            #except:
+            #    output = coords[0][:20]+coords[0][20:]
             return output,coords
