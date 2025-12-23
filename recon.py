@@ -44,16 +44,10 @@ def main(cfg: MRINeRF_Config):
     else:
         device = torch.device("cpu")
         print("Running on the CPU")
-    try:
-        k_space = os.path.join(cfg.files.k_space, cfg.files.subject, cfg.files.slice)
-        coil_map = os.path.join(cfg.files.coil_map, cfg.files.subject, cfg.files.slice)
-        np.load(k_space)
-    except:
-        print('cfg.files.subject',cfg.files.subject)
-        print('cfg.files.k_space',cfg.files.k_space)
-        print('cfg.files.slice',cfg.files.slice)
-        k_space = os.path.join(cfg.files.k_space)
-        coil_map = os.path.join(cfg.files.coil_map)
+
+    k_space = os.path.join(cfg.files.k_space, cfg.files.subject, cfg.files.slice)
+    coil_map = os.path.join(cfg.files.coil_map, cfg.files.subject, cfg.files.slice)
+    np.load(k_space)
 
     model = cfg.models.model
     epochs = cfg.hyper_params.epochs
@@ -92,7 +86,6 @@ def main(cfg: MRINeRF_Config):
         mask = get_mask(torch.zeros([1, 1, 640, 320]),320, 1,type='gaussian1d',acc_factor=reduction_factor,center_fraction=cfg.params.center_fraction)
         mask = mask.cpu().detach().numpy()[0][0]
         save_folder = os.path.join(cfg.paths.save_folder, 'gaussian1d',f'accel{reduction_factor}_norm', cfg.files.subject, cfg.files.slice)
-    os.makedirs(f'{save_folder}/c_est', exist_ok=True)
     
     if cfg.params.mask =='equispaced1d' and reduction_factor==4:
         mask_tensor = get_mask(torch.zeros([1, 1, 640, 320]),320,1, type='equispaced1d', acc_factor=reduction_factor, center_fraction=cfg.params.center_fraction)
@@ -160,25 +153,20 @@ def main(cfg: MRINeRF_Config):
     kspace_repository_i = torch.zeros_like(undersampled_k_space, dtype=torch.float32)
     
     writer = SummaryWriter(log_dir=f'{save_folder}/runs')
+    predicted_c_c_final = None
 
     with train_timing(log, epochs, save_folder):
         for epoch in range(epochs):
-            global predicted_c_c_c_c
-            global predicted_k_space_k
-            global predicted_c_c_c
-
             if epoch == 0:
                 forward_kwargs={
-                    'net': net,
-                    'net2': net2,
-                    'u_k': acs_image,
-                    'coords': torch.cat([nomalized_initial_input.real.unsqueeze(0),nomalized_initial_input.imag.unsqueeze(0)],dim=0).to(device), #
-                    'width': width,
-                    'height': height,
-                    'step': epoch,
-                    }
-            
-            
+                        'net': net,
+                        'net2': net2,
+                        'u_k': acs_image,
+                        'coords': torch.cat([nomalized_initial_input.real.unsqueeze(0),nomalized_initial_input.imag.unsqueeze(0)],dim=0).to(device), 
+                        'width': width,
+                        'height': height,
+                        'step': 0,
+                        }
             predicted_c_c, predicted_cmap = train(**forward_kwargs)
             predicted_cmap = dss(predicted_cmap)
             mr_image = coil_unfold(predicted_c_c, predicted_cmap)
@@ -203,7 +191,6 @@ def main(cfg: MRINeRF_Config):
             optimizer.zero_grad()
             optimizer2.zero_grad()
             
-                
             predicted_k_spaces = predicted_k_space.detach().clone() 
             predicted_k_space_att,att_score = mambamodule(torch.cat([predicted_k_spaces.real.unsqueeze(0).detach(),predicted_k_spaces.imag.unsqueeze(0).detach()],dim=0).float().to(device))
             att_score = torch.sigmoid(att_score)
@@ -231,7 +218,6 @@ def main(cfg: MRINeRF_Config):
                 kspace_repository_i[i].scatter_(-2, top_indices_r[i], predicted_k_spaces.imag[i].gather(-2, top_indices_r[i]).float())
             predicted_k_space_final = torch.complex(kspace_repository_r,kspace_repository_i)
             
-
             if epoch==0 or(epoch+1) % cfg.params.csm_update_iteration == 0 :
                 random_rows, random_cols,random_chas = random_2d_indices(predicted_c_c_s, cfg.params.kspace_masking,epoch,k.shape[0])
                 predicted_k_space_k = predicted_k_space.detach().clone()
@@ -259,6 +245,9 @@ def main(cfg: MRINeRF_Config):
                     'height': height,
                     'step': epoch,
                     }
+                predicted_c_c_final, _ = train(**forward_kwargs)
+            else:
+                predicted_c_c_final = predicted_c_c_c_c
 
             if epoch % 10 == 0:
                 writer.add_scalar('Loss/Net1', net1_loss.item(), epoch)
@@ -271,26 +260,23 @@ def main(cfg: MRINeRF_Config):
                     writer.add_image('Reconstruction/Magnitude', vis_img, epoch)
 
             if epoch == epochs - 1:
-                print(f"\n[Info] Training finished at epoch {epoch}. Saving results...")
+                print(f"Training finished at epoch {epoch}. Saving results...")
                 
-                final_img_np = predicted_c_c_c_c.detach().cpu().numpy()
+                final_img_np = predicted_c_c_final.detach().cpu().numpy()
                 np.save(os.path.join(save_folder, 'final_recon.npy'), final_img_np)
                 
                 c_est_np = predicted_cmap.detach().cpu().numpy()
                 np.save(os.path.join(save_folder, 'c_est', 'sensitivity_map.npy'), c_est_np)
                 
-                try:
-                    os.makedirs(os.path.join(save_folder, 'images'), exist_ok=True)
-                    plt.imsave(os.path.join(save_folder, 'images', 'final_recon.png'), 
-                               np.abs(final_img_np), cmap='gray')
-                    print("Image saved to images/final_recon.png")
-                except Exception as e:
-                    print(f"Failed to save PNG: {e}")
+                os.makedirs(os.path.join(save_folder, 'images'), exist_ok=True)
+                plt.imsave(os.path.join(save_folder, 'images', 'final_recon.png'), 
+                            np.abs(final_img_np), cmap='gray')
 
                 recon = normalize_np(np.abs(final_img_np))
                 target = normalize_np(target)
                 psnr = peak_signal_noise_ratio(target, recon)
                 print("psnr:", psnr)
+
                 os.makedirs(os.path.join(save_folder, 'weights'), exist_ok=True)
                 torch.save(net.state_dict(), os.path.join(save_folder, 'weights', 'ccm_model.pth'))
                 torch.save(net2.state_dict(), os.path.join(save_folder, 'weights', 'csm_model.pth'))
