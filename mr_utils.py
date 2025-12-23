@@ -166,6 +166,23 @@ def get_mask(img, size, batch_size, type='gaussian2d', acc_factor=8, center_frac
                 # ACS region
                 c_from = size // 2 - Nsamp_center // 2
                 mask[i, :, :, c_from:c_from+Nsamp_center] = 1
+    elif type == 'equispaced1d':
+        mask = torch.zeros_like(img)
+        Nsamp_center = int(round(size * center_fraction))
+        stride = int(round(size / Nsamp))
+        c_from = (size - Nsamp_center + 1) // 2
+        c_to = c_from + Nsamp_center
+
+        if fix:
+            offset = 0
+            mask[..., offset::stride] = 1
+            mask[..., c_from : c_to] = 1
+            
+        else:
+            for i in range(batch_size):
+                offset = np.random.randint(0, stride)
+                mask[i, :, :, offset::stride] = 1
+                mask[i, :, :, c_from : c_to] = 1
     else:
         NotImplementedError(f'Mask type {type} is currently not supported.')
 

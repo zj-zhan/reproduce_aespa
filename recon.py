@@ -89,12 +89,16 @@ def main(cfg: MRINeRF_Config):
         save_folder = os.path.join(cfg.paths.save_folder, f'accel{reduction_factor}_norm', cfg.files.subject, cfg.files.slice)
     
     if cfg.params.mask =='gaussian1d' and reduction_factor==4:
-        mask = get_mask(torch.zeros([1, 1, 640, 320]),320, 1,type='gaussian1d',acc_factor=cfg.params.reduction_factor,center_fraction=cfg.params.center_fraction)
+        mask = get_mask(torch.zeros([1, 1, 640, 320]),320, 1,type='gaussian1d',acc_factor=reduction_factor,center_fraction=cfg.params.center_fraction)
         mask = mask.cpu().detach().numpy()[0][0]
-        save_folder = os.path.join(cfg.paths.save_folder, 'gaussian1d',f'accel{cfg.params.reduction_factor}_norm', cfg.files.subject, cfg.files.slice)
+        save_folder = os.path.join(cfg.paths.save_folder, 'gaussian1d',f'accel{reduction_factor}_norm', cfg.files.subject, cfg.files.slice)
     os.makedirs(f'{save_folder}/c_est', exist_ok=True)
     
-
+    if cfg.params.mask =='equispaced1d' and reduction_factor==4:
+        mask_tensor = get_mask(torch.zeros([1, 1, 640, 320]),320,1, type='equispaced1d', acc_factor=reduction_factor, center_fraction=cfg.params.center_fraction)
+        mask = mask_tensor.cpu().detach().numpy()[0][0]
+        save_folder = os.path.join(cfg.paths.save_folder, 'equispaced1d',f'accel{reduction_factor}_norm', cfg.files.subject, cfg.files.slice)
+    os.makedirs(f'{save_folder}/c_est', exist_ok=True)
     # ------------------------------------------------------------
     # data pre-processing to be aligned with ours
     # ------------------------------------------------------------
@@ -279,24 +283,19 @@ def main(cfg: MRINeRF_Config):
                     os.makedirs(os.path.join(save_folder, 'images'), exist_ok=True)
                     plt.imsave(os.path.join(save_folder, 'images', 'final_recon.png'), 
                                np.abs(final_img_np), cmap='gray')
-                    print("[Info] Image saved to images/final_recon.png")
+                    print("Image saved to images/final_recon.png")
                 except Exception as e:
-                    print(f"[Error] Failed to save PNG: {e}")
+                    print(f"Failed to save PNG: {e}")
 
-                #recon = np.sqrt(np.sum(np.abs(final_img_np)**2))
                 recon = normalize_np(np.abs(final_img_np))
                 target = normalize_np(target)
-                #print("target type:",target.dtype)
-                #print("target shape:",target.shape)
-                #print("recon type:",recon.dtype)
-                #print("recon shape:",recon.shape)
                 psnr = peak_signal_noise_ratio(target, recon)
                 print("psnr:", psnr)
                 os.makedirs(os.path.join(save_folder, 'weights'), exist_ok=True)
                 torch.save(net.state_dict(), os.path.join(save_folder, 'weights', 'ccm_model.pth'))
                 torch.save(net2.state_dict(), os.path.join(save_folder, 'weights', 'csm_model.pth'))
                 torch.save(mambamodule.state_dict(), os.path.join(save_folder, 'weights', 'aksm_model.pth'))
-                print("[Info] All results saved successfully!")
+                print("All results saved successfully")
 
     writer.close()
 
