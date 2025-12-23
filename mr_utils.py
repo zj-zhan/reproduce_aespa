@@ -41,21 +41,12 @@ def train(**kwargs):
     output = torch.complex(ri[0,:], ri[1,:])
     output = output.view(width,height)
 
-    if acs_image.shape[0]==40:
-        ri2 = net2(acs_image)
-        ri2 = ri2.view(40,-1)
-        output2 = torch.complex(ri2[:20,:],ri2[20:,:])
-        output2 = output2.view(20,width,height)
-    elif acs_image.shape[0]==30:
-        ri2 = net2(acs_image)
-        ri2 = ri2.view(30,-1)
-        output2 = torch.complex(ri2[:15,:],ri2[15:,:])
-        output2 = output2.view(15,width,height)
-    else:
-        ri2 = net2(acs_image)
-        ri2 = ri2.view(32,-1)
-        output2 = torch.complex(ri2[:16,:],ri2[16:,:])
-        output2 = output2.view(16,width,height)
+    channels = acs_image.shape[0]
+    coils = channels // 2
+    ri2 = net2(acs_image)
+    ri2 = ri2.view(channels,-1)
+    output2 = torch.complex(ri2[:coils,:],ri2[coils:,:])
+    output2 = output2.view(coils,width,height)
     
     return output,output2
 

@@ -95,7 +95,9 @@ def main(cfg: MRINeRF_Config):
     os.makedirs(f'{save_folder}/c_est', exist_ok=True)
     
 
-
+    # ------------------------------------------------------------
+    # data pre-processing to be aligned with ours
+    # ------------------------------------------------------------
     k_space, mask, undersampled_k_space  = process_and_undersample_k_space(k, mask,device)
 
     mrim = kspace_to_img_shifted_mc(torch.tensor(undersampled_k_space,dtype=torch.complex128))
@@ -144,6 +146,8 @@ def main(cfg: MRINeRF_Config):
     
     initial_input = torch.complex(mrim_test*torch.cos(mrim_test_phase), mrim_test*torch.sin(mrim_test_phase))
     nomalized_initial_input = initial_input / torch.max(torch.abs(mrim_test))
+    # ------------------------------------------------------------
+    # ------------------------------------------------------------
     
     #setting
     width, height = k_space[0,:,:].shape
@@ -200,10 +204,8 @@ def main(cfg: MRINeRF_Config):
             predicted_k_space_att,att_score = mambamodule(torch.cat([predicted_k_spaces.real.unsqueeze(0).detach(),predicted_k_spaces.imag.unsqueeze(0).detach()],dim=0).float().to(device))
             att_score = torch.sigmoid(att_score)
 
-            try:
-                att_score = torch.complex(att_score[0,:15], att_score[0,15:])
-            except:
-                att_score = torch.complex(att_score[0,:20], att_score[0,20:])
+            coils = att_score.size(1) // 2
+            att_score = torch.complex(att_score[0,:coils], att_score[0,coils:])
             
             predicted_k_space_t = att_score*predicted_k_spaces
             mr = kspace_to_img_shifted_mc(predicted_k_space_t)
@@ -253,9 +255,6 @@ def main(cfg: MRINeRF_Config):
                     'height': height,
                     'step': epoch,
                     }
-                predicted_c_c_final, _ = train(**forward_kwargs)
-            else:
-                predicted_c_c_final = predicted_c_c_c_c
 
             if epoch % 10 == 0:
                 writer.add_scalar('Loss/Net1', net1_loss.item(), epoch)
@@ -263,14 +262,14 @@ def main(cfg: MRINeRF_Config):
                 writer.add_scalar('Loss/AKSM', aksm_loss.item(), epoch)
                 
                 if epoch % 100 == 0:
-                    vis_img = torch.abs(predicted_c_c_final).detach().cpu().unsqueeze(0)
+                    vis_img = torch.abs(predicted_c_c_c_c).detach().cpu().unsqueeze(0)
                     vis_img = vis_img / torch.max(vis_img)
                     writer.add_image('Reconstruction/Magnitude', vis_img, epoch)
 
             if epoch == epochs - 1:
                 print(f"\n[Info] Training finished at epoch {epoch}. Saving results...")
                 
-                final_img_np = predicted_c_c_final.detach().cpu().numpy()
+                final_img_np = predicted_c_c_c_c.detach().cpu().numpy()
                 np.save(os.path.join(save_folder, 'final_recon.npy'), final_img_np)
                 
                 c_est_np = predicted_cmap.detach().cpu().numpy()
