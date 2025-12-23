@@ -5,11 +5,7 @@ import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 import random
-import pandas as pd
-from mamba_ssm import Mamba
-import sys
 from model import *
-from utils import ideal_bandpass
 import random
 import hydra
 from hydra.core.config_store import ConfigStore
@@ -21,7 +17,7 @@ from mr_utils import kspace_to_img_shifted_mc, img_to_kspace_shifted_mc, coil_co
 from utils import train_timing, kspace_to_target,normalize_np
 
 from model import CCM,CSM, mambalayer
-from utils import set_seed, crop_center, random_2d_indices, plot_metrics, dss, total_variation_loss_cc_jh, total_variation_loss_cmap_jh, cc_loss
+from utils import set_seed,  random_2d_indices, dss, total_variation_loss_cc_jh, total_variation_loss_cmap_jh, cc_loss
 torch.fx.wrap('base_cpp.forward')
 torch.autograd.set_detect_anomaly(True)
 cs = ConfigStore.instance()
@@ -46,7 +42,6 @@ def main(cfg: MRINeRF_Config):
         print("Running on the CPU")
 
     k_space = os.path.join(cfg.files.k_space, cfg.files.subject, cfg.files.slice)
-    coil_map = os.path.join(cfg.files.coil_map, cfg.files.subject, cfg.files.slice)
     np.load(k_space)
 
     model = cfg.models.model
@@ -56,17 +51,8 @@ def main(cfg: MRINeRF_Config):
 
     # Load the npy files
     print('k_space directory',k_space)
-    print('coil_map directory',coil_map)
     k = np.squeeze(np.load(k_space))
-    print('k.shape',k.shape)
-
-    target_width = 320
-    if k.shape[-1] > target_width:
-        start = (k.shape[-1] - target_width) // 2
-        k = k[..., start : start + target_width]
-        print(f"after crop: {k.shape}")
     target = kspace_to_target(k)
-    maxval = float(np.max(target))
 
     kwargs = {
         'log': log,
@@ -103,16 +89,6 @@ def main(cfg: MRINeRF_Config):
     undersampled_k_space = undersampled_k_space/mrim_uk_max
     k_space = k_space /mrim_uk_max
 
-    combined_img_target = kspace_to_img_shifted_mc(k_space)
-    combined_img_target = torch.sqrt(torch.sum(torch.abs(combined_img_target)**2,dim=0))
-    combined_img_target = crop_center(combined_img_target,320)
-    combined_img_target = combined_img_target /torch.max(torch.abs(combined_img_target))
-    combined_img_target = torch.abs(combined_img_target)
-    combined_img_target = ideal_bandpass(combined_img_target.unsqueeze(0),cfg.params.cutoff_low_freq,False)
-    combined_img_target = combined_img_target[0]
-    combined_img_target = ideal_bandpass(combined_img_target.unsqueeze(0),cfg.params.cutoff_high_freq)
-    combined_img_target = combined_img_target[0]
-
     mrim_test_ = kspace_to_img_shifted_mc(undersampled_k_space)
     mrim_test = torch.sqrt(torch.sum(torch.abs(mrim_test_)**2,dim=0))
     mrim_test_phase = torch.angle(torch.sum(mrim_test_,dim=0))
@@ -130,7 +106,6 @@ def main(cfg: MRINeRF_Config):
     acs_image = torch.cat([acs_image.real,acs_image.imag]).float().to(device)
     acs_image = acs_image / torch.max(torch.abs(acs_image))
 
-
     # Initialize network
     if model == 'joint_training':
         net = CCM(**kwargs).to(device)
@@ -143,36 +118,32 @@ def main(cfg: MRINeRF_Config):
     
     initial_input = torch.complex(mrim_test*torch.cos(mrim_test_phase), mrim_test*torch.sin(mrim_test_phase))
     nomalized_initial_input = initial_input / torch.max(torch.abs(mrim_test))
-    # ------------------------------------------------------------
-    # ------------------------------------------------------------
     
     #setting
     width, height = k_space[0,:,:].shape
-    best_loss = 1
     kspace_repository_r = torch.zeros_like(undersampled_k_space, dtype=torch.float32)
     kspace_repository_i = torch.zeros_like(undersampled_k_space, dtype=torch.float32)
     
     writer = SummaryWriter(log_dir=f'{save_folder}/runs')
     predicted_c_c_final = None
 
+    forward_kwargs = {
+        'net': net,
+        'net2': net2,
+        'u_k': acs_image,
+        'coords': torch.cat([nomalized_initial_input.real.unsqueeze(0),nomalized_initial_input.imag.unsqueeze(0)],dim=0).to(device),
+        'width': width,
+        'height': height,
+        'step': 0,
+    }
+
     with train_timing(log, epochs, save_folder):
         for epoch in range(epochs):
-            if epoch == 0:
-                forward_kwargs={
-                        'net': net,
-                        'net2': net2,
-                        'u_k': acs_image,
-                        'coords': torch.cat([nomalized_initial_input.real.unsqueeze(0),nomalized_initial_input.imag.unsqueeze(0)],dim=0).to(device), 
-                        'width': width,
-                        'height': height,
-                        'step': 0,
-                        }
             predicted_c_c, predicted_cmap = train(**forward_kwargs)
             predicted_cmap = dss(predicted_cmap)
             mr_image = coil_unfold(predicted_c_c, predicted_cmap)
             predicted_c_c_c_c = predicted_c_c.detach().clone()
             predicted_c_c_s  =predicted_c_c.clone()
-            predicted_c_c = crop_center(predicted_c_c,320)
             predicted_k_space = img_to_kspace_shifted_mc(mr_image)
             
             loss4 = total_variation_loss_cc_jh(torch.abs(predicted_c_c_s)) 
@@ -224,18 +195,18 @@ def main(cfg: MRINeRF_Config):
                 predicted_k_space_k[random_chas,random_rows, random_cols] = 0
                 predicted_k_space_k = predicted_k_space_k/mrim_uk_max
                 predicted_k_space_k = predicted_k_space_k*(1-mask) + undersampled_k_space*mask
+
                 predicted_c_c_c = kspace_to_img_shifted_mc(predicted_k_space_k)
-                predicted_c_c_c = predicted_c_c_c /torch.max(torch.abs(predicted_c_c_c_c))
+                temp_combine = coil_combine(predicted_c_c_c, predicted_cmap)
+                predicted_c_c_c = predicted_c_c_c / torch.max(torch.abs(temp_combine))
                 predicted_c_c_c_c = coil_combine(predicted_c_c_c, predicted_cmap)
-                predicted_c_c_c_c = predicted_c_c_c_c/torch.max(torch.abs(predicted_c_c_c_c))
+                predicted_c_c_c_c = predicted_c_c_c_c / torch.max(torch.abs(predicted_c_c_c_c))
 
             else:
-                predicted_k_space_k = predicted_k_space.detach().clone() 
                 predicted_c_c_c_c = coil_combine(predicted_c_c_c, predicted_cmap)
-                predicted_c_c_c_c = predicted_c_c_c_c/torch.max(torch.abs(predicted_c_c_c_c))
+                predicted_c_c_c_c = predicted_c_c_c_c / torch.max(torch.abs(predicted_c_c_c_c))
 
-            if epoch !=0 and (epoch+1) % 1 == 0: 
-
+            if epoch < epochs - 1:
                 forward_kwargs={
                     'net': net,
                     'net2': net2,
@@ -243,11 +214,8 @@ def main(cfg: MRINeRF_Config):
                     'coords': torch.cat([predicted_c_c_c_c.real.unsqueeze(0).detach(),predicted_c_c_c_c.imag.unsqueeze(0).detach()],dim=0).float().to(device),
                     'width': width,
                     'height': height,
-                    'step': epoch,
+                    'step': epoch + 1,
                     }
-                predicted_c_c_final, _ = train(**forward_kwargs)
-            else:
-                predicted_c_c_final = predicted_c_c_c_c
 
             if epoch % 10 == 0:
                 writer.add_scalar('Loss/Net1', net1_loss.item(), epoch)
@@ -255,37 +223,46 @@ def main(cfg: MRINeRF_Config):
                 writer.add_scalar('Loss/AKSM', aksm_loss.item(), epoch)
                 
                 if epoch % 100 == 0:
-                    vis_img = torch.abs(predicted_c_c_c_c).detach().cpu().unsqueeze(0)
+                    vis_img_raw = coil_combine(predicted_c_c, predicted_cmap)
+                    vis_img = torch.abs(vis_img_raw).detach().cpu().unsqueeze(0)
                     vis_img = vis_img / torch.max(vis_img)
                     writer.add_image('Reconstruction/Magnitude', vis_img, epoch)
+    print(f"Training finished loop. Running final inference...")    
+    final_kwargs = {
+        'net': net,
+        'net2': net2,
+        'u_k': torch.cat([predicted_c_c_c.real.detach(), predicted_c_c_c.imag.detach()], dim=0).float().to(device),
+        'coords': torch.cat([predicted_c_c_c_c.real.unsqueeze(0).detach(), predicted_c_c_c_c.imag.unsqueeze(0).detach()], dim=0).float().to(device),
+        'width': width,
+        'height': height,
+        'step': epochs,
+    }
 
-            if epoch == epochs - 1:
-                print(f"Training finished at epoch {epoch}. Saving results...")
-                
-                final_img_np = predicted_c_c_final.detach().cpu().numpy()
-                np.save(os.path.join(save_folder, 'final_recon.npy'), final_img_np)
-                
-                c_est_np = predicted_cmap.detach().cpu().numpy()
-                np.save(os.path.join(save_folder, 'c_est', 'sensitivity_map.npy'), c_est_np)
-                
-                os.makedirs(os.path.join(save_folder, 'images'), exist_ok=True)
-                plt.imsave(os.path.join(save_folder, 'images', 'final_recon.png'), 
-                            np.abs(final_img_np), cmap='gray')
+    final_c_c, final_cmap = train(**final_kwargs)
+    final_cmap = dss(final_cmap)
+    final_img_np = final_c_c.detach().cpu().numpy()
+    np.save(os.path.join(save_folder, 'final_recon.npy'), final_img_np)
+    
+    c_est_np = final_cmap.detach().cpu().numpy()
+    np.save(os.path.join(save_folder, 'c_est', 'sensitivity_map.npy'), c_est_np)
 
-                recon = normalize_np(np.abs(final_img_np))
-                target = normalize_np(target)
-                psnr = peak_signal_noise_ratio(target, recon)
-                print("psnr:", psnr)
+    os.makedirs(os.path.join(save_folder, 'images'), exist_ok=True)
+    plt.imsave(os.path.join(save_folder, 'images', 'final_recon.png'), 
+                np.abs(final_img_np), cmap='gray')
+    print("Image saved to images/final_recon.png")
 
-                os.makedirs(os.path.join(save_folder, 'weights'), exist_ok=True)
-                torch.save(net.state_dict(), os.path.join(save_folder, 'weights', 'ccm_model.pth'))
-                torch.save(net2.state_dict(), os.path.join(save_folder, 'weights', 'csm_model.pth'))
-                torch.save(mambamodule.state_dict(), os.path.join(save_folder, 'weights', 'aksm_model.pth'))
-                print("All results saved successfully")
+    recon = normalize_np(np.abs(final_img_np))
+    target_norm = normalize_np(target)
+    psnr = peak_signal_noise_ratio(target_norm, recon)
+    print("psnr:", psnr)
+    
+    os.makedirs(os.path.join(save_folder, 'weights'), exist_ok=True)
+    torch.save(net.state_dict(), os.path.join(save_folder, 'weights', 'ccm_model.pth'))
+    torch.save(net2.state_dict(), os.path.join(save_folder, 'weights', 'csm_model.pth'))
+    torch.save(mambamodule.state_dict(), os.path.join(save_folder, 'weights', 'aksm_model.pth'))
+    print("All results saved successfully")
 
     writer.close()
-
-
 
 if __name__ == "__main__":
     
@@ -302,4 +279,3 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = False
     torch.use_deterministic_algorithms(mode=True)
     main()
-

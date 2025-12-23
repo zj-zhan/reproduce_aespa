@@ -2,11 +2,12 @@ defaults:
   - override hydra/job_logging: default
 
 files:
-  k_space: /data0/zijian/data/Aespa_data/fmknee_pd_npy
-  coil_map: /path/to/coil_map
-  mask: /path/to/mask
-  subject: file1000528
-  slice: 017_0002242886.npy
+  data_path: /data0/zijian/data/Aespa_data/exp_npy
+  #k_space: /data0/zijian/data/Aespa_data/fmknee_pd_npy
+  #coil_map: /path/to/coil_map
+  #mask: /path/to/mask
+  subject: ""
+  slice: ""
 paths:
   save_folder: ./result_exp
 
@@ -31,7 +32,3 @@ params:
   kspace_masking : 2800000
   selective_top_k : 400
   csm_update_iteration : 10
-
-
-
-
