@@ -10,7 +10,7 @@ import logging
 import hydra
 from hydra.core.config_store import ConfigStore
 from torch.utils.tensorboard import SummaryWriter
-from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+from skimage.metrics import peak_signal_noise_ratio
 
 from mridataset_npy import MRISliceDataset 
 
@@ -65,7 +65,7 @@ def reconstruct_step(cfg, batch_data, device, progress_str):
     k_space, mask, undersampled_k_space = process_and_undersample_k_space(k_np, mask, device)
 
     # Initial Guess
-    mrim = kspace_to_img_shifted_mc(undersampled_k_space.clone().detach().to(dtype=torch.complex128))
+    mrim = kspace_to_img_shifted_mc(torch.tensor(undersampled_k_space, dtype=torch.complex128))
     mrim = torch.sqrt(torch.sum(torch.abs(mrim)**2, dim=0))
     mrim_uk_max = torch.max(torch.abs(mrim))
     undersampled_k_space = undersampled_k_space / mrim_uk_max
@@ -175,7 +175,7 @@ def reconstruct_step(cfg, batch_data, device, progress_str):
             kspace_repository_i[i].scatter_(-2, top_indices_r[i], predicted_k_spaces.imag[i].gather(-2, top_indices_r[i]).float())
         predicted_k_space_final = torch.complex(kspace_repository_r, kspace_repository_i)
         
-        #  Data Consistency (DC) & Input Update
+        # 5. Data Consistency (DC) & Input Update
         if epoch == 0 or (epoch+1) % cfg.params.csm_update_iteration == 0:
             random_rows, random_cols, random_chas = random_2d_indices(predicted_c_c_s, cfg.params.kspace_masking, epoch, k_np.shape[0])
             predicted_k_space_k = predicted_k_space.detach().clone()
@@ -236,10 +236,9 @@ def reconstruct_step(cfg, batch_data, device, progress_str):
     except Exception as e:
         print(f"Failed to save PNG: {e}")
 
-    recon_norm = np.abs(final_img_np)
-    target_norm = target
-    psnr_val = peak_signal_noise_ratio(target_norm, recon_norm, data_range=float(1.0))
-    ssim_val = structural_similarity(target_norm, recon_norm, data_range=1.0)
+    recon_norm = normalize_np(np.abs(final_img_np))
+    target_norm = normalize_np(target)
+    psnr_val = peak_signal_noise_ratio(target_norm, recon_norm)
     
     writer.close()
 
@@ -247,9 +246,9 @@ def reconstruct_step(cfg, batch_data, device, progress_str):
     #torch.save(net2.state_dict(), os.path.join(save_folder, 'weights', 'csm_model.pth'))
     #torch.save(mambamodule.state_dict(), os.path.join(save_folder, 'weights', 'aksm_model.pth'))
 
-    return psnr_val, ssim_val
+    return psnr_val
 
-@hydra.main(config_path="conf", config_name='AeSPa', version_base=None)
+@hydra.main(config_path="conf", config_name='AeSPa')
 def main(cfg: MRINeRF_Config):
     print(cfg)
 
@@ -270,20 +269,18 @@ def main(cfg: MRINeRF_Config):
     
     results_log = []
     psnr_values = []
-    ssim_values = []
 
     for i, batch in enumerate(dataloader):
         progress_str = f"{i + 1}/{len(dataset)}"
         fname = batch['fname'][0]
         
         try:
-            curr_psnr,curr_ssim = reconstruct_step(cfg, batch, device, progress_str)
+            curr_psnr = reconstruct_step(cfg, batch, device, progress_str)
             
             if curr_psnr > 0:
                 psnr_values.append(curr_psnr)
-                ssim_values.append(curr_ssim)
-                results_log.append((fname, curr_psnr, curr_ssim))
-                print(f"Slice {fname} Done. PSNR: {curr_psnr:.5f} | SSIM: {curr_ssim:.5f}")
+                results_log.append((fname, curr_psnr))
+                print(f"Slice {batch['fname'][0]} Done. PSNR: {curr_psnr:.4f}")
             else:
                 print(f"Slice {batch['fname'][0]} Failed or Skipped.")
                 
@@ -294,20 +291,16 @@ def main(cfg: MRINeRF_Config):
 
     if len(psnr_values) > 0:
         psnr_array = np.array(psnr_values)
-        ssim_array = np.array(ssim_values)
         mean_psnr = np.mean(psnr_array)
         std_psnr = np.std(psnr_array)
-        mean_ssim = np.mean(ssim_array)
-        std_ssim = np.std(ssim_array)
             
         print(f"{'SLICE NAME':<35} | {'PSNR':<10}")
-        for name, p_val, s_val in results_log:
-            print(f"{name:<35} | {p_val:.5f}     | {s_val:.5f}")
+        for name, val in results_log:
+            print(f"{name:<35} | {val:.4f}")
 
         print(f"Batch Reconstruction Finished for Subject: {cfg.files.subject}")
         print(f"Total Slices: {len(dataset)}")
-        print(f"Average PSNR: {mean_psnr:.5f} ± {std_psnr:.5f}")
-        print(f"Average SSIM: {mean_ssim:.5f} ± {std_ssim:.5f}")
+        print(f"Average PSNR: {mean_psnr:.4f} ± {std_psnr:.4f}")
     else:
         print("No slices were successfully reconstructed.")
 
