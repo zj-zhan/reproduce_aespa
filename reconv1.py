@@ -28,44 +28,45 @@ log = logging.getLogger(__name__)
 
 def reconstruct_step(cfg, batch_data, device, progress_str):
     fname = batch_data['fname'][0] 
-    k_np = batch_data['k_space'][0].numpy() 
+    k_np = batch_data['kspace'][0].numpy() 
+    target = batch_data['rss'][0].numpy()
 
     cfg.files.slice = fname
     set_seed(2027) 
-
-    target = kspace_to_target(k_np)
     
     reduction_factor = cfg.params.reduction_factor
     save_folder = ""
     acs = cfg.params.acs
 
+    height, width = k_np.shape[-2], k_np.shape[-1]
+
     if cfg.params.mask =='uniform1d' and reduction_factor==4:
-        mask = np.zeros((k_np.shape[-2], k_np.shape[-1]), dtype=float)
-        mask[:,(k_np.shape[-1]-acs)//2:(k_np.shape[-1]+acs)//2-1] = 1
-        mask[:,::(cfg.params.reduction_factor+2)] = 1
+        mask = np.zeros((height, width), dtype=float)
+        start_idx = (width - acs) // 2
+        end_idx = start_idx + acs
+        mask[:, start_idx:end_idx] = 1 
+        mask[:, ::(cfg.params.reduction_factor+2)] = 1
         save_folder = os.path.join(cfg.paths.save_folder, f'accel{reduction_factor}_norm', fname)
     
     elif cfg.params.mask =='gaussian1d' and reduction_factor==4:
-        mask = get_mask(torch.zeros([1, 1, 640, 320]),320, 1,type='gaussian1d',acc_factor=reduction_factor,center_fraction=cfg.params.center_fraction)
+        mask_shape = torch.zeros([1, 1, height, width])
+        mask = get_mask(mask_shape, width, 1, type='gaussian1d', 
+                        acc_factor=reduction_factor, center_fraction=cfg.params.center_fraction)
         mask = mask.cpu().detach().numpy()[0][0]
-        save_folder = os.path.join(cfg.paths.save_folder, 'gaussian1d',f'accel{reduction_factor}_norm', fname)
+        save_folder = os.path.join(cfg.paths.save_folder, 'gaussian1d', f'accel{reduction_factor}_norm', fname)
         
     elif cfg.params.mask =='equispaced1d' and reduction_factor==4:
-        mask_tensor = get_mask(torch.zeros([1, 1, 640, 320]),320,1, type='equispaced1d', acc_factor=reduction_factor, center_fraction=cfg.params.center_fraction)
+        mask_shape = torch.zeros([1, 1, height, width])
+        mask_tensor = get_mask(mask_shape, width, 1, type='equispaced1d', 
+                               acc_factor=reduction_factor, center_fraction=cfg.params.center_fraction)
         mask = mask_tensor.cpu().detach().numpy()[0][0]
-        save_folder = os.path.join(cfg.paths.save_folder, 'equispaced1d',f'accel{reduction_factor}_norm', fname)
+        save_folder = os.path.join(cfg.paths.save_folder, 'equispaced1d', f'accel{reduction_factor}_norm', fname)
 
     os.makedirs(f'{save_folder}/c_est', exist_ok=True)
     os.makedirs(os.path.join(save_folder, 'images'), exist_ok=True)
     os.makedirs(os.path.join(save_folder, 'weights'), exist_ok=True)
 
     k_space, mask, undersampled_k_space = process_and_undersample_k_space(k_np, mask, device)
-
-    # Initial Guess
-    mrim = kspace_to_img_shifted_mc(undersampled_k_space.clone().detach().to(dtype=torch.complex128))
-    mrim = torch.sqrt(torch.sum(torch.abs(mrim)**2, dim=0))
-    mrim_uk_max = torch.max(torch.abs(mrim))
-    undersampled_k_space = undersampled_k_space / mrim_uk_max
 
     # Net2 ACS Input
     mrim_test_ = kspace_to_img_shifted_mc(undersampled_k_space)
@@ -177,7 +178,6 @@ def reconstruct_step(cfg, batch_data, device, progress_str):
             random_rows, random_cols, random_chas = random_2d_indices(predicted_c_c_s, cfg.params.kspace_masking, epoch, k_np.shape[0])
             predicted_k_space_k = predicted_k_space.detach().clone()
             predicted_k_space_k[random_chas, random_rows, random_cols] = 0
-            predicted_k_space_k = predicted_k_space_k / mrim_uk_max
             predicted_k_space_k = predicted_k_space_k * (1-mask) + undersampled_k_space * mask
             
             predicted_c_c_c = kspace_to_img_shifted_mc(predicted_k_space_k)
@@ -237,10 +237,11 @@ def reconstruct_step(cfg, batch_data, device, progress_str):
     target_norm = normalize_np(target)
     psnr_val = peak_signal_noise_ratio(target_norm, recon_norm, data_range=1.0)
     ssim_val = structural_similarity(target_norm, recon_norm, data_range=1.0)
+    nmse_val = np.linalg.norm(target_norm - recon_norm)**2 / np.linalg.norm(target_norm)**2
     
     writer.close()
 
-    return psnr_val, ssim_val
+    return psnr_val, ssim_val, nmse_val
 
 @hydra.main(config_path="conf", config_name='AeSPa',version_base=None)
 def main(cfg: MRINeRF_Config):
@@ -255,7 +256,7 @@ def main(cfg: MRINeRF_Config):
 
     data_path = cfg.files.data_path
 
-    dataset = MRISliceDataset(root_dir=data_path)
+    dataset = MRISliceDataset(root=data_path, target_size=320)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4)
 
     print(f"Found {len(dataset)} slices. Start Batch Reconstruction...")
@@ -263,36 +264,42 @@ def main(cfg: MRINeRF_Config):
     results_log = []
     psnr_values = []
     ssim_values = []
+    nmse_values = []
 
     for i, batch in enumerate(dataloader):
         progress_str = f"{i + 1}/{len(dataset)}"
         fname = batch['fname'][0]
         
-        psnr, ssim = reconstruct_step(cfg, batch, device, progress_str)
+        psnr, ssim, nmse = reconstruct_step(cfg, batch, device, progress_str)
         
         psnr_values.append(psnr)
         ssim_values.append(ssim)
-        results_log.append((fname, psnr, ssim))
+        nmse_values.append(nmse)
+        results_log.append((fname, psnr, ssim, nmse))
         print(f"Slice {batch['fname'][0]} Done. PSNR: {psnr:.5f}")
 
 
     if len(psnr_values) > 0:
         psnr_array = np.array(psnr_values)
         ssim_array = np.array(ssim_values)
+        nmse_array = np.array(nmse_values)
 
         mean_psnr = np.mean(psnr_array)
         std_psnr = np.std(psnr_array)
         mean_ssim = np.mean(ssim_array)
         std_ssim = np.std(ssim_array)
+        mean_nmse = np.mean(nmse_array)
+        std_nmse = np.std(nmse_array)
             
         print(f"{'SLICE NAME':<35} | {'PSNR':<10}")
-        for name, p_val, s_val in results_log:
-            print(f"{name:<35} | {p_val:.5f}     | {s_val:.5f}")
+        for name, psnr_val, ssim_val, nmse_val in results_log:
+            print(f"{name:<35} | {psnr_val:.5f}     | {ssim_val:.5f}     | {nmse_val:.5f}")
 
         print(f"Batch Reconstruction Finished for Subject: {cfg.files.subject}")
         print(f"Total Slices: {len(dataset)}")
         print(f"Average PSNR: {mean_psnr:.5f} ± {std_psnr:.5f}")
         print(f"Average SSIM: {mean_ssim:.5f} ± {std_ssim:.5f}")
+        print(f"Average SSIM: {mean_nmse:.5f} ± {std_nmse:.5f}")
     else:
         print("No slices were successfully reconstructed.")
 

@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 torch.autograd.set_detect_anomaly(True)
 
 
-@hydra.main(config_path="conf", config_name='AeSPa')
+@hydra.main(config_path="conf", config_name='AeSPa', version_base=None)
 def main(cfg: MRINeRF_Config):
     print(cfg)
     set_seed(2027)
@@ -83,7 +83,7 @@ def main(cfg: MRINeRF_Config):
     # ------------------------------------------------------------
     k_space, mask, undersampled_k_space  = process_and_undersample_k_space(k, mask,device)
 
-    mrim = kspace_to_img_shifted_mc(torch.tensor(undersampled_k_space,dtype=torch.complex128))
+    mrim = kspace_to_img_shifted_mc(undersampled_k_space.clone().detach().to(dtype=torch.complex128))
     mrim = torch.sqrt(torch.sum(torch.abs(mrim)**2,dim=0))
     mrim_uk_max = torch.max(torch.abs(mrim))
     undersampled_k_space = undersampled_k_space/mrim_uk_max

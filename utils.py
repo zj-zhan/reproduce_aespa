@@ -370,7 +370,7 @@ def kspace_to_target(x: np.ndarray) -> np.ndarray:
     return np.sqrt(np.sum(np.square(np.abs(ifft2_np(x))), axis=-3)).astype(np.float32)
 
 def normalize_np(img):
-  """ Normalize img in arbitrary range to [0, 1] """
+  """ Normalize img in arbitrary range to (0, 1] """
   #img -= np.min(img)
   img /= np.max(img)
   return img
