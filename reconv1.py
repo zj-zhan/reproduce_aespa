@@ -5,20 +5,25 @@ import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 import random
-from torch.utils.data import DataLoader
+import csv
 import logging
 import hydra
+import shutil
+from torch.utils.data import DataLoader
 from hydra.core.config_store import ConfigStore
-from torch.utils.tensorboard import SummaryWriter
-from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+from tqdm import tqdm
+
 from mridataset_npy import MRISliceDataset 
+from mridataset import MRIDataset
 from config import MRINeRF_Config
 from model import CCM, CSM, mambalayer
+from util_plot import plot_gt_pred
+from util_eval import psnr, ssim, nmse as calc_nmse, print_metric
 from mr_utils import (kspace_to_img_shifted_mc, img_to_kspace_shifted_mc, 
                       coil_combine, coil_unfold, k_loss_l1, 
                       process_and_undersample_k_space, get_mask, train)
-from utils import (kspace_to_target, normalize_np, set_seed, random_2d_indices, dss, 
-                   total_variation_loss_cc_jh, total_variation_loss_cmap_jh, cc_loss)
+from utils import (normalize_np, set_seed, random_2d_indices, dss, total_variation_loss_cc_jh,
+                   total_variation_loss_cmap_jh, cc_loss)
 
 torch.fx.wrap('base_cpp.forward')
 torch.autograd.set_detect_anomaly(True)
@@ -26,18 +31,23 @@ cs = ConfigStore.instance()
 cs.store(name="mri_nerf_config", node=MRINeRF_Config)
 log = logging.getLogger(__name__)
 
-def reconstruct_step(cfg, batch_data, device, progress_str):
+def reconstruct_step(cfg, batch_data, device, batch_idx):
     fname = batch_data['fname'][0] 
     k_np = batch_data['kspace'][0].numpy() 
     target = batch_data['rss'][0].numpy()
+    maxval = batch_data['max_val'][0].item() 
+    
+    if 'shape_raw' in batch_data:
+        shape_raw = batch_data['shape_raw'][0].numpy()
+    else:
+        shape_raw = target.shape
 
-    cfg.files.slice = fname
-    set_seed(2027) 
+    set_seed(2027)
+    save_root = cfg.paths.save_folder
+    visual_dir = os.path.join(save_root, 'visual')
     
     reduction_factor = cfg.params.reduction_factor
-    save_folder = ""
     acs = cfg.params.acs
-
     height, width = k_np.shape[-2], k_np.shape[-1]
 
     if cfg.params.mask =='uniform1d' and reduction_factor==4:
@@ -46,29 +56,26 @@ def reconstruct_step(cfg, batch_data, device, progress_str):
         end_idx = start_idx + acs
         mask[:, start_idx:end_idx] = 1 
         mask[:, ::(cfg.params.reduction_factor+2)] = 1
-        save_folder = os.path.join(cfg.paths.save_folder, f'accel{reduction_factor}_norm', fname)
     
     elif cfg.params.mask =='gaussian1d' and reduction_factor==4:
         mask_shape = torch.zeros([1, 1, height, width])
         mask = get_mask(mask_shape, width, 1, type='gaussian1d', 
                         acc_factor=reduction_factor, center_fraction=cfg.params.center_fraction)
         mask = mask.cpu().detach().numpy()[0][0]
-        save_folder = os.path.join(cfg.paths.save_folder, 'gaussian1d', f'accel{reduction_factor}_norm', fname)
         
     elif cfg.params.mask =='equispaced1d' and reduction_factor==4:
         mask_shape = torch.zeros([1, 1, height, width])
         mask_tensor = get_mask(mask_shape, width, 1, type='equispaced1d', 
                                acc_factor=reduction_factor, center_fraction=cfg.params.center_fraction)
         mask = mask_tensor.cpu().detach().numpy()[0][0]
-        save_folder = os.path.join(cfg.paths.save_folder, 'equispaced1d', f'accel{reduction_factor}_norm', fname)
-
-    os.makedirs(f'{save_folder}/c_est', exist_ok=True)
-    os.makedirs(os.path.join(save_folder, 'images'), exist_ok=True)
-    os.makedirs(os.path.join(save_folder, 'weights'), exist_ok=True)
 
     k_space, mask, undersampled_k_space = process_and_undersample_k_space(k_np, mask, device)
 
     # Net2 ACS Input
+    mrim = kspace_to_img_shifted_mc(undersampled_k_space.clone().detach().to(dtype=torch.complex128))
+    mrim = torch.sqrt(torch.sum(torch.abs(mrim)**2, dim=0))
+    mrim_uk_max = torch.max(torch.abs(mrim))
+    undersampled_k_space = undersampled_k_space / mrim_uk_max
     mrim_test_ = kspace_to_img_shifted_mc(undersampled_k_space)
     mrim_test = torch.sqrt(torch.sum(torch.abs(mrim_test_)**2, dim=0))
     mrim_test_phase = torch.angle(torch.sum(mrim_test_, dim=0))
@@ -104,9 +111,6 @@ def reconstruct_step(cfg, batch_data, device, progress_str):
     kspace_repository_i = torch.zeros_like(undersampled_k_space, dtype=torch.float32)
     
     epochs = cfg.hyper_params.epochs
-    writer = SummaryWriter(log_dir=f'{save_folder}/runs')
-
-    print(f"[{progress_str}] Processing {fname} ...")
     predicted_c_c_c = None 
 
     forward_kwargs = {
@@ -121,11 +125,8 @@ def reconstruct_step(cfg, batch_data, device, progress_str):
     }
 
     for epoch in range(epochs):
-        
-        # Forward Pass
         predicted_c_c, predicted_cmap = train(**forward_kwargs)
         
-        # Backward Pass
         predicted_cmap = dss(predicted_cmap)
         mr_image = coil_unfold(predicted_c_c, predicted_cmap)
         predicted_c_c_c_c = predicted_c_c.detach().clone()
@@ -173,11 +174,12 @@ def reconstruct_step(cfg, batch_data, device, progress_str):
             kspace_repository_i[i].scatter_(-2, top_indices_r[i], predicted_k_spaces.imag[i].gather(-2, top_indices_r[i]).float())
         predicted_k_space_final = torch.complex(kspace_repository_r, kspace_repository_i)
         
-        # Data Consistency (DC) & Input Update
+        # Data Consistency
         if epoch == 0 or (epoch+1) % cfg.params.csm_update_iteration == 0:
             random_rows, random_cols, random_chas = random_2d_indices(predicted_c_c_s, cfg.params.kspace_masking, epoch, k_np.shape[0])
             predicted_k_space_k = predicted_k_space.detach().clone()
             predicted_k_space_k[random_chas, random_rows, random_cols] = 0
+            predicted_k_space_k = predicted_k_space_k / mrim_uk_max
             predicted_k_space_k = predicted_k_space_k * (1-mask) + undersampled_k_space * mask
             
             predicted_c_c_c = kspace_to_img_shifted_mc(predicted_k_space_k)
@@ -199,16 +201,6 @@ def reconstruct_step(cfg, batch_data, device, progress_str):
                 'width': width, 'height': height, 'step': epoch + 1
             }
 
-        if epoch % 50 == 0:
-            writer.add_scalar('Loss/Net1', net1_loss.item(), epoch)
-            if epoch % 200 == 0:
-                vis_img_raw = coil_combine(predicted_c_c, predicted_cmap)
-                vis_img = torch.abs(vis_img_raw).detach().cpu().unsqueeze(0)
-                vis_img = vis_img / torch.max(vis_img)
-                writer.add_image(f'Reconstruction/{fname}', vis_img, epoch)
-
-    print(f"[{progress_str}] Loop finished. Running final inference...")
-
     final_kwargs = {
         'net': net,
         'net2': net2,
@@ -220,30 +212,35 @@ def reconstruct_step(cfg, batch_data, device, progress_str):
     }
 
     final_c_c, final_cmap = train(**final_kwargs)
-    final_cmap = dss(final_cmap)
+    # final_cmap = dss(final_cmap)
     final_img_np = final_c_c.detach().cpu().numpy()
-    
-    np.save(os.path.join(save_folder, 'final_recon.npy'), final_img_np)
-    c_est_np = final_cmap.detach().cpu().numpy()
-    np.save(os.path.join(save_folder, 'c_est', 'sensitivity_map.npy'), c_est_np)
-    
-    try:
-        plt.imsave(os.path.join(save_folder, 'images', 'final_recon.png'), 
-                   np.abs(final_img_np), cmap='gray')
-    except Exception as e:
-        print(f"Failed to save PNG: {e}")
 
     recon_norm = normalize_np(np.abs(final_img_np))
     target_norm = normalize_np(target)
-    psnr_val = peak_signal_noise_ratio(target_norm, recon_norm, data_range=1.0)
-    ssim_val = structural_similarity(target_norm, recon_norm, data_range=1.0)
-    nmse_val = np.linalg.norm(target_norm - recon_norm)**2 / np.linalg.norm(target_norm)**2
     
-    writer.close()
+    maxval0 = float(1.0) # for 2d eval
+    tgt_max = np.max(target_norm)
+    maxval1 = float(maxval / tgt_max) # for 3d eval
+    
+    psnr2d_val = psnr(target_norm, recon_norm, maxval0)
+    ssim2d_val = ssim(target_norm, recon_norm, maxval0)
+    psnr3d_val = psnr(target_norm, recon_norm, maxval1) 
+    ssim3d_val = ssim(target_norm, recon_norm, maxval1)
+    
+    nmse_val = calc_nmse(target_norm, recon_norm)
+    
+    if batch_idx < 100:
+        os.makedirs(visual_dir, exist_ok=True)
+        plot_gt_pred(gt=target_norm, 
+                     pred=recon_norm, 
+                     shape_raw=shape_raw, 
+                     max_value=maxval1, 
+                     output_dir=visual_dir, 
+                     name_ids=batch_idx)
 
-    return psnr_val, ssim_val, nmse_val
+    return psnr2d_val, ssim2d_val, psnr3d_val, ssim3d_val, nmse_val, save_root
 
-@hydra.main(config_path="conf", config_name='AeSPa',version_base=None)
+@hydra.main(config_path="conf", config_name='AeSPa', version_base=None)
 def main(cfg: MRINeRF_Config):
     print(cfg)
 
@@ -255,53 +252,68 @@ def main(cfg: MRINeRF_Config):
         print("Running on the CPU")
 
     data_path = cfg.files.data_path
+    target_size = cfg.files.target_size
+    which_data = cfg.files.which_data 
+    data_norm_type = cfg.files.data_norm_type
 
-    dataset = MRISliceDataset(root=data_path, target_size=320)
+    #dataset = MRISliceDataset(root=data_path, target_size=320)  #npy dataset
+    dataset = MRIDataset(data_path, target_size, which_data, data_norm_type)  #h5 dataset
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4)
-
-    print(f"Found {len(dataset)} slices. Start Batch Reconstruction...")
     
     results_log = []
-    psnr_values = []
-    ssim_values = []
-    nmse_values = []
+    psnr2d_list = []
+    ssim2d_list = []
+    psnr3d_list = []
+    ssim3d_list = []
+    nmse_list = []
+    
+    loop = tqdm(dataloader, desc="Reconstructing", unit="slice")
+    
+    save_dir = cfg.paths.save_folder
+    if os.path.exists(save_dir):
+        shutil.rmtree(save_dir)
+    os.makedirs(save_dir, exist_ok=True)
 
-    for i, batch in enumerate(dataloader):
-        progress_str = f"{i + 1}/{len(dataset)}"
-        fname = batch['fname'][0]
+    for i, batch in enumerate(loop):
+        cur_psnr2d, cur_ssim2d, cur_psnr3d, cur_ssim3d, cur_nmse, cur_save_root = reconstruct_step(cfg, batch, device, i)
+        save_dir = cur_save_root
         
-        psnr, ssim, nmse = reconstruct_step(cfg, batch, device, progress_str)
+        psnr2d_list.append(cur_psnr2d)
+        ssim2d_list.append(cur_ssim2d)
+        psnr3d_list.append(cur_psnr3d)
+        ssim3d_list.append(cur_ssim3d)
+        nmse_list.append(cur_nmse)
         
-        psnr_values.append(psnr)
-        ssim_values.append(ssim)
-        nmse_values.append(nmse)
-        results_log.append((fname, psnr, ssim, nmse))
-        print(f"Slice {batch['fname'][0]} Done. PSNR: {psnr:.5f}")
+        results_log.append((i, cur_psnr2d, cur_ssim2d, cur_psnr3d, cur_ssim3d, cur_nmse))
+        #loop.set_postfix_str(f"PSNR2d: {cur_psnr2d:.2f} | SSIM2d: {cur_ssim2d:.4f}")
 
+    psnr2d_array = np.array(psnr2d_list)
+    ssim2d_array = np.array(ssim2d_list)
+    psnr3d_array = np.array(psnr3d_list)
+    ssim3d_array = np.array(ssim3d_list)
+    nmse_array = np.array(nmse_list)
 
-    if len(psnr_values) > 0:
-        psnr_array = np.array(psnr_values)
-        ssim_array = np.array(ssim_values)
-        nmse_array = np.array(nmse_values)
+    print_metric("NMSE", nmse_array)
+    print_metric("PSNR2d", psnr2d_array)
+    print_metric("SSIM2d", ssim2d_array)
+    print_metric("PSNR3d", psnr3d_array)
+    print_metric("SSIM3d", ssim3d_array)
+    mean_psnr2d = np.mean(psnr2d_array)
+    std_psnr2d = np.std(psnr2d_array)
+    mean_ssim2d = np.mean(ssim2d_array)
+    std_ssim2d = np.std(ssim2d_array)
 
-        mean_psnr = np.mean(psnr_array)
-        std_psnr = np.std(psnr_array)
-        mean_ssim = np.mean(ssim_array)
-        std_ssim = np.std(ssim_array)
-        mean_nmse = np.mean(nmse_array)
-        std_nmse = np.std(nmse_array)
-            
-        print(f"{'SLICE NAME':<35} | {'PSNR':<10}")
-        for name, psnr_val, ssim_val, nmse_val in results_log:
-            print(f"{name:<35} | {psnr_val:.5f}     | {ssim_val:.5f}     | {nmse_val:.5f}")
-
-        print(f"Batch Reconstruction Finished for Subject: {cfg.files.subject}")
-        print(f"Total Slices: {len(dataset)}")
-        print(f"Average PSNR: {mean_psnr:.5f} ± {std_psnr:.5f}")
-        print(f"Average SSIM: {mean_ssim:.5f} ± {std_ssim:.5f}")
-        print(f"Average SSIM: {mean_nmse:.5f} ± {std_nmse:.5f}")
-    else:
-        print("No slices were successfully reconstructed.")
+    csv_path = os.path.join(save_dir, 'eval_metrics.csv')
+    os.makedirs(save_dir, exist_ok=True)
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Slice', 'PSNR2d', 'SSIM2d', 'PSNR3d', 'SSIM3d', 'NMSE'])
+        writer.writerows(results_log)
+        writer.writerow([])
+        writer.writerow(['Average', mean_psnr2d, mean_ssim2d, np.mean(psnr3d_array), np.mean(ssim3d_array), np.mean(nmse_array)])
+        writer.writerow(['Std', std_psnr2d, std_ssim2d, np.std(psnr3d_array), np.std(ssim3d_array), np.std(nmse_array)])
+        
+    print(f"Metrics saved to: {csv_path}")   
 
 if __name__ == "__main__":
     seed = 2027
