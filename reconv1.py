@@ -12,7 +12,8 @@ import shutil
 from torch.utils.data import DataLoader
 from hydra.core.config_store import ConfigStore
 from tqdm import tqdm
-
+#import torch._dynamo
+#torch._dynamo.config.suppress_errors = True
 from mridataset_npy import MRISliceDataset 
 from mridataset import MRIDataset
 from config import MRINeRF_Config
@@ -215,24 +216,21 @@ def reconstruct_step(cfg, batch_data, device, batch_idx):
     # final_cmap = dss(final_cmap)
     final_img_np = final_c_c.detach().cpu().numpy()
 
-    recon_norm = normalize_np(np.abs(final_img_np))
-    target_norm = normalize_np(target)
-    
     maxval0 = float(1.0) # for 2d eval
-    tgt_max = np.max(target_norm)
-    maxval1 = float(maxval / tgt_max) # for 3d eval
+    maxval1 = float(maxval / np.max(target)) # for 3d eval
+    x = normalize_np(np.abs(final_img_np))
+    y = normalize_np(target)
     
-    psnr2d_val = psnr(target_norm, recon_norm, maxval0)
-    ssim2d_val = ssim(target_norm, recon_norm, maxval0)
-    psnr3d_val = psnr(target_norm, recon_norm, maxval1) 
-    ssim3d_val = ssim(target_norm, recon_norm, maxval1)
-    
-    nmse_val = calc_nmse(target_norm, recon_norm)
+    psnr2d_val = psnr(y, x, maxval0)
+    ssim2d_val = ssim(y, x, maxval0)
+    psnr3d_val = psnr(y, x, maxval1) 
+    ssim3d_val = ssim(y, x, maxval1)
+    nmse_val = calc_nmse(y, x)
     
     if batch_idx < 100:
         os.makedirs(visual_dir, exist_ok=True)
-        plot_gt_pred(gt=target_norm, 
-                     pred=recon_norm, 
+        plot_gt_pred(gt=y, 
+                     pred=x, 
                      shape_raw=shape_raw, 
                      max_value=maxval1, 
                      output_dir=visual_dir, 
@@ -256,9 +254,9 @@ def main(cfg: MRINeRF_Config):
     which_data = cfg.files.which_data 
     data_norm_type = cfg.files.data_norm_type
 
-    #dataset = MRISliceDataset(root=data_path, target_size=320)  #npy dataset
-    dataset = MRIDataset(data_path, target_size, which_data, data_norm_type)  #h5 dataset
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4)
+    #dataset = MRISliceDataset(root=data_path, target_size=320)  # npy dataset
+    dataset = MRIDataset(data_path, target_size, which_data, data_norm_type)  # h5 dataset
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=16)
     
     results_log = []
     psnr2d_list = []
@@ -323,6 +321,6 @@ if __name__ == "__main__":
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.benchmark = True
     
     main()
