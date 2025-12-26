@@ -84,6 +84,10 @@ def main(cfg: MRINeRF_Config):
     k_space, mask, undersampled_k_space  = process_and_undersample_k_space(k, mask,device)
 
     mrim = kspace_to_img_shifted_mc(undersampled_k_space.clone().detach().to(dtype=torch.complex128))
+    mrim = torch.sqrt(torch.sum(torch.abs(mrim)**2, dim=0))
+    mrim_uk_max = torch.max(torch.abs(mrim))
+    undersampled_k_space = undersampled_k_space / mrim_uk_max
+    mrim = kspace_to_img_shifted_mc(undersampled_k_space.clone().detach().to(dtype=torch.complex128))
     mrim = torch.sqrt(torch.sum(torch.abs(mrim)**2,dim=0))
     mrim_uk_max = torch.max(torch.abs(mrim))
     undersampled_k_space = undersampled_k_space/mrim_uk_max

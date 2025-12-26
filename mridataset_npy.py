@@ -69,7 +69,7 @@ class MRISliceDataset(Dataset):
         kspace_raw, max_value = self.slicedata[idx]
         fname = Path(self.slicedata.raw_samples[idx][0]).name
         mctgt = ifft2_np(kspace_raw)
-        #mctgt, shape_raw = self._to_uniform_size(mctgt)
+        mctgt, shape_raw = self._to_uniform_size(mctgt)
         kspace = fft2_np(mctgt)
         norm_factor = 1.0 / max_value
         mctgt = mctgt * norm_factor
@@ -84,5 +84,5 @@ class MRISliceDataset(Dataset):
             'kspace': kspace,
             "rss": tgt,
             "max_val": max_value,
-            #"shape_raw": shape_raw,
+            "shape_raw": shape_raw,
         }

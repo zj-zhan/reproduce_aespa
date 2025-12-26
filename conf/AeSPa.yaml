@@ -5,16 +5,15 @@ files:
   which_data: "knee"
   target_size: 320
   data_norm_type: "volume_max"
-  data_path: /data0/zijian/data/Aespa_data/example_pd_data
-
+  data_path: ../../../fastmri_knee_mc_tiny/multicoil_val1
 paths:
-  save_folder: ./results/2volume_320_uniform1d_0.09
+  save_folder: ./results/equispaced_fmknee
 
 models:
   model: joint_training 
         
 hyper_params: 
-  gpu: '3'
+  gpu: '7'
   epochs: 2000
   lr: 5e-4
   aksmlr: 5e-5
@@ -22,9 +21,9 @@ hyper_params:
 params:
   real: 1 #real 0 : simulation, real 1 :raw
   reduction_factor: 4 # accel
-  acs: 28
-  center_fraction: 0.09 # (rf4, 0.09) (rf8, 0.05) in brain, image shape (640, 320)
-  mask: 'uniform1d'
+  acs: 25
+  center_fraction: 0.08 # (rf4, 0.09) (rf8, 0.05) in brain, image shape (640, 320)
+  mask: 'equispaced1d'
   kspace_masking : 2800000
   selective_top_k : 200
   csm_update_iteration : 10

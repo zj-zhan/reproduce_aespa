@@ -272,15 +272,15 @@ class mambalayer(nn.Module):
         def __init__(self, n=8, **kwargs):
             super(mambalayer, self).__init__()
             self.mamba = Mamba(
-                        d_model=640,
-                        # d_model=320,
+                        #d_model=640,
+                        d_model=320,
                         d_state=64,  
                         d_conv=640,    
                         expand=1,   
                     )
         
-            self.ln = torch.nn.LayerNorm(640)
-            # self.ln = torch.nn.LayerNorm(320)
+            #self.ln = torch.nn.LayerNorm(640)
+            self.ln = torch.nn.LayerNorm(320)
 
 
         def forward(self, coords):
