@@ -12,14 +12,13 @@ import shutil
 from torch.utils.data import DataLoader
 from hydra.core.config_store import ConfigStore
 from tqdm import tqdm
-#import torch._dynamo
-#torch._dynamo.config.suppress_errors = True
+
 from mridataset_npy import MRISliceDataset 
 from mridataset import MRIDataset
 from config import MRINeRF_Config
 from model import CCM, CSM, mambalayer
 from util_plot import plot_gt_pred
-from util_eval import psnr, ssim, nmse as calc_nmse, print_metric
+from util_eval import psnr, ssim, nmse as calc_nmse, print_metric, center_crop, img3_rm_black_border
 from mr_utils import (kspace_to_img_shifted_mc, img_to_kspace_shifted_mc, 
                       coil_combine, coil_unfold, k_loss_l1, 
                       process_and_undersample_k_space, get_mask, train)
@@ -218,8 +217,12 @@ def reconstruct_step(cfg, batch_data, device, batch_idx):
 
     maxval0 = float(1.0) # for 2d eval
     maxval1 = float(maxval / np.max(target)) # for 3d eval
-    x = normalize_np(np.abs(final_img_np))
     y = normalize_np(target)
+    x = normalize_np(np.abs(final_img_np))
+
+    y = center_crop(y, shape_raw)
+    x = center_crop(x, shape_raw)
+    y, x, _ = img3_rm_black_border(y, x)
     
     psnr2d_val = psnr(y, x, maxval0)
     ssim2d_val = ssim(y, x, maxval0)
