@@ -230,7 +230,7 @@ def reconstruct_step(cfg, batch_data, device, batch_idx):
     ssim3d_val = ssim(y, x, maxval1)
     nmse_val = calc_nmse(y, x)
     
-    if batch_idx < 100:
+    if batch_idx < 80:
         os.makedirs(visual_dir, exist_ok=True)
         plot_gt_pred(gt=y, 
                      pred=x, 

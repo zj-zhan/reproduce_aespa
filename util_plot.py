@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from util_eval import nmse, psnr, ssim
 
-def plot_gt_pred(gt, pred, shape_raw, max_value, output_dir, name_ids, escale=1.):
+def plot_gt_pred(gt, pred, shape_raw, max_value, output_dir, name_ids, escale=10.):
     """
     Plot ground truth image with predicted image, both with 1 channel.
     Image black border is cut if exists in GT. Metrics are saved in filename.
